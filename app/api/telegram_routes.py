@@ -20,6 +20,7 @@ Auth model:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -154,7 +155,12 @@ def _day_prefix(item: dict[str, Any]) -> str:
     return ""
 
 
-def _format_event_line(item: dict[str, Any], *, include_date: bool) -> str:
+def _format_event_line(
+    item: dict[str, Any],
+    *,
+    include_date: bool,
+    name_by_id: dict[str, str] | None = None,
+) -> str:
     """Render a single family-event or schedule-block row as a bullet line."""
     title = item.get("title", "(ללא כותרת)")
     start = item.get("startMinutes")
@@ -167,7 +173,17 @@ def _format_event_line(item: dict[str, Any], *, include_date: bool) -> str:
         time_str = f" ({_hhmm(start)}-{_hhmm(end)})"
     location = item.get("location")
     loc_str = f" 📍{location}" if location else ""
-    return f"• {prefix}{title}{time_str}{loc_str}"
+
+    # Assignee badge — omit for family-wide events (the default).
+    assignee_str = ""
+    assignee_type = item.get("assigneeType")
+    assignee_id = item.get("assigneeId")
+    if assignee_type in ("kid", "member") and assignee_id and name_by_id:
+        label = name_by_id.get(assignee_id)
+        if label:
+            assignee_str = f" [{label}]"
+
+    return f"• {prefix}{title}{time_str}{loc_str}{assignee_str}"
 
 
 def _format_events_query_reply(
@@ -176,15 +192,23 @@ def _format_events_query_reply(
     *,
     kid_name: str | None = None,
     schedule_blocks: list[dict[str, Any]] | None = None,
+    name_by_id: dict[str, str] | None = None,
 ) -> str:
     """
     Render the events query reply. When `kid_name` is set and
     `schedule_blocks` is provided, the reply has two sections (events vs.
     schedule) so the user can tell family appointments apart from the kid's
     weekly classes/hobbies.
+
+    `name_by_id`: maps assigneeId (UUID) → display label used as a badge on
+    each event line (e.g. "🎮 שלומי" or "👩 מזל"). Family-wide events
+    (assigneeType="family") get no badge.
     """
     label = _RANGE_HE.get(range_, "להיום")
     include_date = range_ == "week"
+
+    def fmt(e: dict[str, Any]) -> str:
+        return _format_event_line(e, include_date=include_date, name_by_id=name_by_id)
 
     if kid_name and schedule_blocks is not None:
         # Kid-scoped reply: two clearly labeled sections.
@@ -193,22 +217,20 @@ def _format_events_query_reply(
         out: list[str] = []
         if events:
             out.append(f"📅 אירועים של {kid_name} {label}:")
-            out.extend(_format_event_line(e, include_date=include_date) for e in events)
+            out.extend(fmt(e) for e in events)
         if schedule_blocks:
             if out:
                 out.append("")  # blank line between sections
             out.append(f"📚 לוח שבועי של {kid_name}:")
-            out.extend(
-                _format_event_line(b, include_date=include_date)
-                for b in schedule_blocks
-            )
+            out.extend(fmt(b) for b in schedule_blocks)
         return "\n".join(out)
 
-    # Family-wide (no kid scope): keep the prior single-section format.
+    # Family-wide (no kid scope): show assignee badge on each line so the
+    # user can tell at a glance which events belong to which kid or parent.
     if not events:
         return f"📅 אין אירועים {label}."
     lines = [f"📅 אירועים {label}:"]
-    lines.extend(_format_event_line(e, include_date=include_date) for e in events)
+    lines.extend(fmt(e) for e in events)
     return "\n".join(lines)
 
 
@@ -322,22 +344,46 @@ async def _handle_text_message(
             return _format_note_reply(parsed)
 
         if isinstance(parsed, QueryEventsIntent):
-            events = await family_os_client.list_family_events(
-                family_id, range_=parsed.range, kid_name=parsed.kid_name
-            )
-            schedule_blocks: list[dict[str, Any]] | None = None
-            if parsed.kid_name:
-                # For kid-scoped queries, also fetch the kid's weekly classes/
-                # hobbies (schedule_blocks) so the bot answers the whole
-                # picture, not just family appointments.
-                schedule_blocks = await family_os_client.list_schedule_blocks(
+            # Fetch events, kids, and members in parallel so each event line
+            # can be labelled with the assignee's name and emoji.
+            fetch_schedule = parsed.kid_name is not None
+            coros = [
+                family_os_client.list_family_events(
                     family_id, range_=parsed.range, kid_name=parsed.kid_name
+                ),
+                family_os_client.list_kids(family_id),
+                family_os_client.list_members(family_id),
+            ]
+            if fetch_schedule:
+                coros.append(
+                    family_os_client.list_schedule_blocks(
+                        family_id, range_=parsed.range, kid_name=parsed.kid_name
+                    )
                 )
+            results = await asyncio.gather(*coros, return_exceptions=True)
+
+            events = results[0] if not isinstance(results[0], Exception) else []
+            kids_list = results[1] if not isinstance(results[1], Exception) else []
+            members_list = results[2] if not isinstance(results[2], Exception) else []
+            schedule_blocks: list[dict[str, Any]] | None = None
+            if fetch_schedule:
+                schedule_blocks = results[3] if not isinstance(results[3], Exception) else []
+
+            # Build id → "emoji name" map for both kids and members.
+            name_by_id: dict[str, str] = {}
+            for k in kids_list:
+                emoji = k.get("emoji") or "👦"
+                name_by_id[k["id"]] = f"{emoji} {k['name']}"
+            for m in members_list:
+                emoji = m.get("avatarEmoji") or "👤"
+                name_by_id[m["id"]] = f"{emoji} {m['displayName']}"
+
             return _format_events_query_reply(
                 parsed.range,
                 events,
                 kid_name=parsed.kid_name,
                 schedule_blocks=schedule_blocks,
+                name_by_id=name_by_id,
             )
 
         if isinstance(parsed, QueryGroceryIntent):

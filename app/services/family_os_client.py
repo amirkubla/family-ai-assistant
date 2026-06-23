@@ -230,5 +230,13 @@ class FamilyOsClient:
             r.raise_for_status()
             return r.json()
 
+    async def list_kids(self, family_id: str) -> list[dict[str, Any]]:
+        """List active kids (id, name, emoji)."""
+        url = f"{self._base}/v1/internal/family/{family_id}/kids"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(url, headers=self._headers())
+            r.raise_for_status()
+            return r.json()
+
 
 family_os_client = FamilyOsClient()
