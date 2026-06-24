@@ -119,6 +119,50 @@ class QueryProjectsIntent(BaseModel):
     include_done: bool = False
 
 
+class PaymentIntent(BaseModel):
+    intent: Literal["payment"] = "payment"
+    # A kid payment ("תשלום") — money owed for a kid (e.g. a class fee).
+    kid_name: str  # Hebrew kid name, prefixes stripped ("לדני" → "דני").
+    note: str  # the payment name, e.g. "חוג ציור".
+    amount_nis: float = Field(..., gt=0, description="amount in NIS (shekels)")
+    is_recurring: bool = False
+    recurrence_type: Literal["weekly", "monthly"] | None = None
+    # 0-6 (Sun=0) for weekly; 1-31 for monthly. Only when is_recurring.
+    recurrence_day: int | None = None
+    # One-time only: due date "YYYY-MM-DD" in Asia/Jerusalem, if the user gave one.
+    date: str | None = None
+
+
+class QueryPaymentsIntent(BaseModel):
+    intent: Literal["query_payments"] = "query_payments"
+    # Optional kid scope ("של דני"). Strip prefixes like query_events.
+    kid_name: str | None = None
+
+
+class PayPaymentIntent(BaseModel):
+    intent: Literal["pay_payment"] = "pay_payment"
+    # The payment name the user said they paid ("שילמתי את חוג הציור" → "חוג ציור").
+    note: str
+    kid_name: str | None = None
+
+
+class ExpenseIntent(BaseModel):
+    intent: Literal["expense"] = "expense"
+    # A general settled expense ("הוצאתי 50 שקל על דלק") — NOT a kid payment.
+    amount_nis: float = Field(..., gt=0, description="amount in NIS (shekels)")
+    # Optional budget category in Hebrew (see system prompt for the list).
+    category_name: str | None = None
+    # What it was spent on, free text ("דלק", "סופר").
+    note: str | None = None
+    date: str | None = None  # "YYYY-MM-DD", if stated.
+
+
+class QueryBudgetIntent(BaseModel):
+    intent: Literal["query_budget"] = "query_budget"
+    # Only "month" is supported today; default current month.
+    period: Literal["month"] = "month"
+
+
 class UnsupportedIntent(BaseModel):
     intent: Literal["unsupported"] = "unsupported"
     reason: str
@@ -131,11 +175,16 @@ ParsedIntent = (
     | ChoreIntent
     | NoteIntent
     | ProjectIntent
+    | PaymentIntent
+    | ExpenseIntent
     | QueryEventsIntent
     | QueryGroceryIntent
     | QueryChoresIntent
     | QueryNotesIntent
     | QueryProjectsIntent
+    | QueryPaymentsIntent
+    | QueryBudgetIntent
+    | PayPaymentIntent
     | UnsupportedIntent
 )
 
@@ -149,8 +198,10 @@ from the list below and emit JSON matching that intent's schema.
 CRITICAL: every response MUST include a top-level "intent" field whose value
 is EXACTLY one of:
   "family_event" | "grocery" | "chore" | "note" | "project" |
+  "payment" | "expense" |
   "query_events" | "query_grocery" | "query_chores" |
-  "query_notes" | "query_projects" | "unsupported"
+  "query_notes" | "query_projects" | "query_payments" | "query_budget" |
+  "pay_payment" | "unsupported"
 
 If you omit the "intent" field the bot cannot route the message and the
 user gets a generic error. Always include it, in every example, on every
@@ -344,13 +395,82 @@ Intents:
       "אילו פרוייקטים פעילים?"  → {"intent":"query_projects","include_done":false}
       "מה הפרוייקטים שסיימנו?"  → {"intent":"query_projects","include_done":true}
 
-11. "unsupported" — the request is something else (kids' schedules,
-    general chat, deleting/updating existing items, weather, budget).
+11. "payment" — the user wants to add a KID PAYMENT: money owed for a specific
+    kid (a class fee, tuition, an activity), with an amount in shekels. Always
+    tied to a named kid. Triggers: "תשלום", "תוסיף תשלום ל…", "צריך לשלם עבור…",
+    "שכר לימוד", "דמי חוג", combined with a kid name and an amount.
+    Fields:
+      kid_name        — Hebrew kid name, prefixes stripped ("לדני" → "דני").
+      note            — the payment name ("חוג ציור", "צהרון", "שיעורי שחייה").
+      amount_nis      — amount in SHEKELS (e.g. 200, 34.5). NOT agorot.
+      is_recurring    — true for repeating payments ("כל חודש", "חודשי", "שבועי").
+      recurrence_type — "weekly" or "monthly". Only when is_recurring.
+      recurrence_day  — 0-6 (Sun=0) for weekly; 1-31 for monthly. Map "ב-1 לחודש"
+                        → 1; "כל יום ראשון" → 0. Only when is_recurring.
+      date            — one-time only: due date "YYYY-MM-DD" if the user gave one.
+    Examples:
+      "תוסיף תשלום לדני: חוג ציור 200 שקל ב-1 לחודש" →
+        {"intent":"payment","kid_name":"דני","note":"חוג ציור","amount_nis":200,"is_recurring":true,"recurrence_type":"monthly","recurrence_day":1}
+      "תשלום חד פעמי לנועה: טיול שנתי 150 ש\\"ח" →
+        {"intent":"payment","kid_name":"נועה","note":"טיול שנתי","amount_nis":150,"is_recurring":false}
+      "צריך לשלם 300 שקל על צהרון של דני כל חודש" →
+        {"intent":"payment","kid_name":"דני","note":"צהרון","amount_nis":300,"is_recurring":true,"recurrence_type":"monthly","recurrence_day":1}
+
+12. "expense" — the user is LOGGING money already SPENT (a settled expense),
+    NOT money owed for a kid. Distinguish from "payment": expense = "הוצאתי /
+    שילמתי / קניתי" in the PAST about general spending; payment = a kid's
+    upcoming fee. Triggers: "הוצאתי", "שילמתי על", "קניתי ב-", "עלה לי".
+    Fields:
+      amount_nis    — amount in SHEKELS.
+      category_name — optional, ONE of these Hebrew budget categories if it
+                      clearly fits: "מזון וקניות", "בית ושירותים",
+                      "ילדים וחוגים", "תחבורה", "בילויים", "בריאות", "אחר".
+                      Omit if unclear (defaults to "אחר").
+      note          — what it was for ("דלק", "סופר", "מסעדה").
+      date          — "YYYY-MM-DD" if stated, else omit (defaults to today).
+    Examples:
+      "הוצאתי 50 שקל על דלק" →
+        {"intent":"expense","amount_nis":50,"category_name":"תחבורה","note":"דלק"}
+      "שילמתי 320 בסופר" →
+        {"intent":"expense","amount_nis":320,"category_name":"מזון וקניות","note":"סופר"}
+      "עלה לי 80 שקל מסעדה אתמול" →
+        {"intent":"expense","amount_nis":80,"category_name":"בילויים","note":"מסעדה"}
+
+13. "query_payments" — the user is ASKING what payments are outstanding / due.
+    Triggers: "מה התשלומים", "כמה צריך לשלם", "אילו תשלומים", "מה לשלם".
+    Fields:
+      kid_name — Hebrew kid name if scoped ("של דני"), prefixes stripped. Else null.
+    Examples:
+      "מה התשלומים הקרובים?"     → {"intent":"query_payments"}
+      "כמה צריך לשלם החודש?"     → {"intent":"query_payments"}
+      "אילו תשלומים יש לדני?"    → {"intent":"query_payments","kid_name":"דני"}
+
+14. "pay_payment" — the user says they PAID a specific kid payment (settle it).
+    Triggers: "שילמתי את…", "סימנתי ששילמתי…", "כבר שילמנו את…".
+    Fields:
+      note     — the payment name they paid ("שילמתי את חוג הציור" → "חוג ציור").
+      kid_name — kid name if mentioned, prefixes stripped. Else null.
+    Examples:
+      "שילמתי את חוג הציור של דני" →
+        {"intent":"pay_payment","note":"חוג ציור","kid_name":"דני"}
+      "סימנתי ששילמתי את הצהרון" →
+        {"intent":"pay_payment","note":"צהרון"}
+
+15. "query_budget" — the user is ASKING how much was spent (spending summary).
+    Triggers: "כמה הוצאנו", "כמה הוצאתי החודש", "מה ההוצאות", "סיכום הוצאות".
+    Fields:
+      period — only "month" today (default).
+    Examples:
+      "כמה הוצאנו החודש?"  → {"intent":"query_budget","period":"month"}
+      "מה ההוצאות החודש?"  → {"intent":"query_budget","period":"month"}
+
+16. "unsupported" — the request is something else (kids' schedules,
+    general chat, deleting/updating existing items, weather).
     Field:
       reason — short Hebrew message the bot will show the user.
     Example:
       "מה מזג האוויר?" →
-        {"intent":"unsupported","reason":"אני יודע להוסיף ולשאול לגבי אירועים, קניות, משימות, פתקים ופרוייקטים — שאר הדברים עוד לא."}
+        {"intent":"unsupported","reason":"אני יודע להוסיף ולשאול לגבי אירועים, קניות, משימות, פתקים, פרוייקטים, תשלומים והוצאות — שאר הדברים עוד לא."}
 
 Rules:
 - ALWAYS return valid JSON matching ONE of the schemas above.
@@ -424,6 +544,10 @@ async def parse_intent(text: str) -> ParsedIntent:
             return NoteIntent.model_validate(raw)
         if intent == "project":
             return ProjectIntent.model_validate(raw)
+        if intent == "payment":
+            return PaymentIntent.model_validate(raw)
+        if intent == "expense":
+            return ExpenseIntent.model_validate(raw)
         if intent == "query_events":
             return QueryEventsIntent.model_validate(raw)
         if intent == "query_grocery":
@@ -434,6 +558,12 @@ async def parse_intent(text: str) -> ParsedIntent:
             return QueryNotesIntent.model_validate(raw)
         if intent == "query_projects":
             return QueryProjectsIntent.model_validate(raw)
+        if intent == "query_payments":
+            return QueryPaymentsIntent.model_validate(raw)
+        if intent == "query_budget":
+            return QueryBudgetIntent.model_validate(raw)
+        if intent == "pay_payment":
+            return PayPaymentIntent.model_validate(raw)
         if intent == "unsupported":
             return UnsupportedIntent.model_validate(raw)
     except Exception as exc:  # noqa: BLE001
@@ -455,13 +585,18 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
       items                        → grocery
       body                         → note
       start_minutes / end_minutes  → family_event  (chore has no time)
+      amount_nis (+ kid_name+note) → payment   (kid payment)
+      amount_nis (bare)            → expense    (general spending)
+      period                       → query_budget
       range                        → query_events  (chore has no range)
       mine / today                 → query_chores
       pinned_only                  → query_notes
       include_done                 → query_projects
       status (+ title)             → project  (chore has no status field)
-      assigned_to or just title    → chore
+      assigned_to                  → chore
+      note (no amount, no title)   → pay_payment  (settle by name)
       only `reason`                → unsupported
+      title alone                  → chore
     """
     keys = set(raw.keys())
     if "items" in keys:
@@ -470,6 +605,11 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
         return "note"
     if "start_minutes" in keys or "end_minutes" in keys:
         return "family_event"
+    if "amount_nis" in keys:
+        # A kid payment carries a kid_name + note; a bare amount is an expense.
+        return "payment" if ("kid_name" in keys and "note" in keys) else "expense"
+    if "period" in keys:
+        return "query_budget"
     if "range" in keys:
         return "query_events"
     if "mine" in keys or "today" in keys:
@@ -485,6 +625,9 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
     # `status` with `title` is a project; `title` alone leans chore.
     if "status" in keys and "title" in keys:
         return "project"
+    # `note` without amount/title → settling a payment by name.
+    if "note" in keys:
+        return "pay_payment"
     if "title" in keys:
         return "chore"
     return None

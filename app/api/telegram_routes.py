@@ -35,14 +35,19 @@ from app.services import telegram_service
 from app.services.family_os_client import family_os_client
 from app.services.intent_parser import (
     ChoreIntent,
+    ExpenseIntent,
     FamilyEventIntent,
     GroceryIntent,
     NoteIntent,
+    PaymentIntent,
+    PayPaymentIntent,
     ProjectIntent,
+    QueryBudgetIntent,
     QueryChoresIntent,
     QueryEventsIntent,
     QueryGroceryIntent,
     QueryNotesIntent,
+    QueryPaymentsIntent,
     QueryProjectsIntent,
     UnsupportedIntent,
     parse_intent,
@@ -358,6 +363,86 @@ def _format_project_created_reply(intent: ProjectIntent) -> str:
     return f"🗂️ נוצר פרוייקט: {intent.title}\n{status_label}"
 
 
+# ── payments + expenses ──────────────────────────────────────────────────────
+
+_RECUR_HE = {"weekly": "שבועי", "monthly": "חודשי"}
+
+
+def _ils(agorot: int) -> str:
+    """Format agorot (NIS×100) as a shekel string; decimals only when non-zero."""
+    nis = (agorot or 0) / 100
+    return f"₪{int(nis)}" if nis == int(nis) else f"₪{nis:.2f}"
+
+
+def _format_payments_query_reply(
+    payments: list[dict[str, Any]],
+    *,
+    name_by_id: dict[str, str] | None = None,
+    kid_name: str | None = None,
+) -> str:
+    if not payments:
+        scope = f" ל{kid_name}" if kid_name else ""
+        return f"💰 אין תשלומים פתוחים{scope}."
+    total = sum(p.get("amount", 0) for p in payments)
+    header = (
+        f"💰 תשלומים של {kid_name} ({_ils(total)}):"
+        if kid_name
+        else f"💰 תשלומים לתשלום ({_ils(total)}):"
+    )
+    lines = [header]
+    for p in payments:
+        note = p.get("note") or "(ללא שם)"
+        amount = _ils(p.get("amount", 0))
+        due = p.get("dueDate", "")
+        recur = (
+            f" · {_RECUR_HE.get(p.get('recurrenceType') or '', 'חוזר')}"
+            if p.get("isRecurring")
+            else ""
+        )
+        # Owner badge only in the family-wide view (kid-scoped is implied).
+        owner = ""
+        if not kid_name and name_by_id:
+            label = name_by_id.get(p.get("kidId"))
+            if label:
+                owner = f" [{label}]"
+        lines.append(f"• {note} — {amount} (עד {due}){recur}{owner}")
+    return "\n".join(lines)
+
+
+def _format_payment_created_reply(intent: PaymentIntent) -> str:
+    amount = _ils(round(intent.amount_nis * 100))
+    base = f"💰 נוסף תשלום ל{intent.kid_name}: {intent.note} — {amount}"
+    if intent.is_recurring:
+        base += f"\n🔁 {_RECUR_HE.get(intent.recurrence_type or 'monthly', 'חוזר')}"
+    return base
+
+
+def _format_pay_paid_reply(note: str, kid_label: str | None) -> str:
+    who = f" של {kid_label}" if kid_label else ""
+    return f"✅ סומן כשולם: {note}{who}"
+
+
+def _format_expense_reply(intent: ExpenseIntent) -> str:
+    amount = _ils(round(intent.amount_nis * 100))
+    cat = intent.category_name or "אחר"
+    note = f" ({intent.note})" if intent.note else ""
+    return f"🧾 נרשמה הוצאה: {amount} — {cat}{note}"
+
+
+def _format_budget_query_reply(month: str, expenses: list[dict[str, Any]]) -> str:
+    if not expenses:
+        return f"🧾 אין הוצאות רשומות ל-{month}."
+    total = sum(e.get("amount", 0) for e in expenses)
+    by_cat: dict[str, int] = {}
+    for e in expenses:
+        cat = e.get("categoryName") or "אחר"
+        by_cat[cat] = by_cat.get(cat, 0) + e.get("amount", 0)
+    lines = [f"🧾 הוצאות ל-{month}: {_ils(total)}"]
+    for cat, amt in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+        lines.append(f"• {cat}: {_ils(amt)}")
+    return "\n".join(lines)
+
+
 def _format_grocery_reply(intent: GroceryIntent) -> str:
     if len(intent.items) == 1:
         it = intent.items[0]
@@ -549,6 +634,89 @@ async def _handle_text_message(
             kids_list = kids_res if not isinstance(kids_res, Exception) else []
             name_by_id = _build_name_map(kids_list, None)
             return _format_projects_query_reply(projects_res, name_by_id=name_by_id)
+
+        if isinstance(parsed, PaymentIntent):
+            await family_os_client.create_payment(
+                family_id,
+                kid_name=parsed.kid_name,
+                note=parsed.note,
+                amount=round(parsed.amount_nis * 100),  # NIS → agorot
+                date=parsed.date,
+                is_recurring=parsed.is_recurring,
+                recurrence_type=parsed.recurrence_type,
+                recurrence_day=parsed.recurrence_day,
+            )
+            return _format_payment_created_reply(parsed)
+
+        if isinstance(parsed, ExpenseIntent):
+            await family_os_client.create_expense(
+                family_id,
+                amount=round(parsed.amount_nis * 100),  # NIS → agorot
+                category_name=parsed.category_name,
+                note=parsed.note,
+                date=parsed.date,
+            )
+            return _format_expense_reply(parsed)
+
+        if isinstance(parsed, QueryPaymentsIntent):
+            payments_res, kids_res = await asyncio.gather(
+                family_os_client.list_payments(family_id, kid_name=parsed.kid_name),
+                family_os_client.list_kids(family_id),
+                return_exceptions=True,
+            )
+            if isinstance(payments_res, Exception):
+                raise payments_res
+            kids_list = kids_res if not isinstance(kids_res, Exception) else []
+            name_by_id = _build_name_map(kids_list, None)
+            return _format_payments_query_reply(
+                payments_res, name_by_id=name_by_id, kid_name=parsed.kid_name
+            )
+
+        if isinstance(parsed, PayPaymentIntent):
+            payments_res, kids_res = await asyncio.gather(
+                family_os_client.list_payments(family_id, kid_name=parsed.kid_name),
+                family_os_client.list_kids(family_id),
+                return_exceptions=True,
+            )
+            if isinstance(payments_res, Exception):
+                raise payments_res
+            kids_list = kids_res if not isinstance(kids_res, Exception) else []
+            name_by_id = _build_name_map(kids_list, None)
+
+            # Fuzzy-match the payment the user said they paid, by name.
+            target = parsed.note.strip().lower()
+            matches = [
+                p
+                for p in payments_res
+                if target and (
+                    target in (p.get("note") or "").strip().lower()
+                    or (p.get("note") or "").strip().lower() in target
+                )
+            ]
+            if not matches:
+                return (
+                    f"🤔 לא מצאתי תשלום פתוח בשם \"{parsed.note}\". "
+                    f"אפשר לבדוק עם \"מה התשלומים?\""
+                )
+            if len(matches) > 1:
+                # No persistent state — list the candidates and ask to be specific.
+                lines = ["נמצאו כמה תשלומים מתאימים — על איזה דיברת? נסו לציין שם מלא או ילד:"]
+                for p in matches:
+                    owner = name_by_id.get(p.get("kidId"), "")
+                    owner_str = f" [{owner}]" if owner else ""
+                    lines.append(f"• {p.get('note')} — {_ils(p.get('amount', 0))}{owner_str}")
+                return "\n".join(lines)
+
+            chosen = matches[0]
+            await family_os_client.pay_payment(family_id, chosen["id"])
+            kid_label = name_by_id.get(chosen.get("kidId"))
+            return _format_pay_paid_reply(chosen.get("note") or parsed.note, kid_label)
+
+        if isinstance(parsed, QueryBudgetIntent):
+            res = await family_os_client.list_expenses(family_id)
+            return _format_budget_query_reply(
+                res.get("month", ""), res.get("expenses", [])
+            )
     except httpx.HTTPStatusError as exc:
         log.warning("family-os API %s: %s", exc.response.status_code, exc.response.text[:200])
         return (
@@ -625,8 +793,10 @@ async def telegram_webhook(
                 "• \"תזכיר לעודד להוציא את הזבל\"\n"
                 "• \"תרשום פתק שהמפתחות אצל השכן\"\n"
                 "• \"תוסיף פרוייקט: שיפוץ סלון\"\n"
+                "• \"תוסיף תשלום לדני: חוג ציור 200 ש\\\"ח כל חודש\"\n"
+                "• \"הוצאתי 50 שקל על דלק\"\n"
                 "• \"מה יש לי היום?\" / \"מה ברשימת הקניות?\"\n"
-                "• \"אילו פתקים יש לנו?\" / \"מה הפרוייקטים שלנו?\"\n"
+                "• \"מה התשלומים?\" / \"כמה הוצאנו החודש?\"\n"
                 "\n"
                 "💡 כדאי לרשום /me כדי לבחור מי אתה במשפחה — "
                 "אחר כך אדע לסנן שאלות כמו \"המשימות שלי\".",
@@ -643,8 +813,11 @@ async def telegram_webhook(
             "• להוסיף משימה: \"תזכיר לעודד להוציא את הזבל\"\n"
             "• לרשום פתק: \"תרשום שהמפתחות אצל השכן\"\n"
             "• להוסיף פרוייקט: \"תוסיף פרוייקט: שיפוץ חדר\"\n"
+            "• תשלומי ילדים: \"תוסיף תשלום לנועה: צהרון 300 כל חודש\"\n"
+            "• לרשום הוצאה: \"הוצאתי 80 שקל במסעדה\"\n"
+            "• לסמן ששולם: \"שילמתי את חוג הציור של דני\"\n"
             "• לשאול: \"מה יש לי היום?\" / \"מה ברשימת הקניות?\" / \"מה המשימות?\"\n"
-            "• \"אילו פתקים יש לנו?\" / \"מה הפרוייקטים שלנו?\"\n"
+            "• \"אילו פתקים יש לנו?\" / \"מה הפרוייקטים?\" / \"מה התשלומים?\" / \"כמה הוצאנו החודש?\"\n"
             "\n"
             "פקודות:\n"
             "• /me        — בחר מי אתה במשפחה (בשביל שאלות אישיות כמו \"המשימות שלי\")",

@@ -270,5 +270,101 @@ class FamilyOsClient:
             r.raise_for_status()
             return r.json()
 
+    # ── kid payments ────────────────────────────────────────────────────────
+
+    async def list_payments(
+        self, family_id: str, *, kid_name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Outstanding kid payments with server-computed next-due dates.
+        Each row: {id, note, amount (agorot), kidId, dueDate, isRecurring,
+        recurrenceType}. `kid_name` optionally scopes to one kid.
+        """
+        url = f"{self._base}/v1/internal/family/{family_id}/payments"
+        params: dict[str, str] = {}
+        if kid_name is not None:
+            params["kidName"] = kid_name
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(url, headers=self._headers(), params=params)
+            r.raise_for_status()
+            return r.json()
+
+    async def create_payment(
+        self,
+        family_id: str,
+        *,
+        kid_name: str,
+        note: str,
+        amount: int,  # agorot
+        date: str | None = None,
+        is_recurring: bool = False,
+        recurrence_type: str | None = None,
+        recurrence_day: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a kid payment (one-time or recurring). amount in agorot."""
+        body: dict[str, Any] = {
+            "kidName": kid_name,
+            "note": note,
+            "amount": amount,
+            "isRecurring": is_recurring,
+        }
+        if date is not None:
+            body["date"] = date
+        if recurrence_type is not None:
+            body["recurrenceType"] = recurrence_type
+        if recurrence_day is not None:
+            body["recurrenceDay"] = recurrence_day
+        url = f"{self._base}/v1/internal/family/{family_id}/payments"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(url, headers=self._headers(), json=body)
+            r.raise_for_status()
+            return r.json()
+
+    async def pay_payment(self, family_id: str, payment_id: str) -> dict[str, Any]:
+        """Settle a kid payment by id (occurrence for recurring, toggle for one-time)."""
+        url = f"{self._base}/v1/internal/family/{family_id}/payments/pay"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(url, headers=self._headers(), json={"id": payment_id})
+            r.raise_for_status()
+            return r.json()
+
+    # ── expenses (general spending) ──────────────────────────────────────────
+
+    async def create_expense(
+        self,
+        family_id: str,
+        *,
+        amount: int,  # agorot
+        category_name: str | None = None,
+        note: str | None = None,
+        date: str | None = None,
+    ) -> dict[str, Any]:
+        """Log a settled expense in any budget category. amount in agorot."""
+        body: dict[str, Any] = {"amount": amount}
+        if category_name is not None:
+            body["categoryName"] = category_name
+        if note is not None:
+            body["note"] = note
+        if date is not None:
+            body["date"] = date
+        url = f"{self._base}/v1/internal/family/{family_id}/expenses"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(url, headers=self._headers(), json=body)
+            r.raise_for_status()
+            return r.json()
+
+    async def list_expenses(
+        self, family_id: str, *, month: str | None = None
+    ) -> dict[str, Any]:
+        """Paid expenses for a month (default current). Returns {month, expenses}."""
+        url = f"{self._base}/v1/internal/family/{family_id}/expenses"
+        params: dict[str, str] = {}
+        if month is not None:
+            params["month"] = month
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(url, headers=self._headers(), params=params)
+            r.raise_for_status()
+            return r.json()
+
 
 family_os_client = FamilyOsClient()
