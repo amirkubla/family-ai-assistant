@@ -136,6 +136,25 @@ def _hhmm(m: int) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
+def _build_name_map(
+    kids: list[dict[str, Any]] | None,
+    members: list[dict[str, Any]] | None,
+) -> dict[str, str]:
+    """
+    Build a UUID → "emoji name" label map from kids and members lists.
+    Used to resolve owner/assignee IDs (events' assigneeId, notes/projects'
+    kidId, chores' assignedToMemberId) into a human-readable badge.
+    """
+    name_by_id: dict[str, str] = {}
+    for k in kids or []:
+        emoji = k.get("emoji") or "👦"
+        name_by_id[k["id"]] = f"{emoji} {k['name']}"
+    for m in members or []:
+        emoji = m.get("avatarEmoji") or "👤"
+        name_by_id[m["id"]] = f"{emoji} {m['displayName']}"
+    return name_by_id
+
+
 def _day_prefix(item: dict[str, Any]) -> str:
     """
     A leading day label for week-view lines. One-time items carry a `date`
@@ -251,7 +270,10 @@ def _format_grocery_query_reply(items: list[dict[str, Any]]) -> str:
 
 
 def _format_chores_query_reply(
-    chores: list[dict[str, Any]], *, scoped: bool = False
+    chores: list[dict[str, Any]],
+    *,
+    scoped: bool = False,
+    name_by_id: dict[str, str] | None = None,
 ) -> str:
     if not chores:
         return "✅ אין משימות פתוחות שלך." if scoped else "✅ אין משימות פתוחות."
@@ -259,16 +281,37 @@ def _format_chores_query_reply(
     lines = [header]
     for c in chores:
         title = c.get("title", "(ללא כותרת)")
-        assignee = c.get("assignedTo")
-        # Don't repeat the assignee when the list is already scoped to one
-        # person — they know.
-        suffix = "" if scoped else (f" — {assignee}" if assignee else "")
+        # Owner resolution: prefer the linked member (assignedToMemberId →
+        # name), since the app stores ONLY the member id when you assign a
+        # chore in the UI. Fall back to the free-text assignedTo (bot-created
+        # chores carry it). Don't repeat the owner when the list is already
+        # scoped to one person — they know.
+        suffix = ""
+        if not scoped:
+            member_id = c.get("assignedToMemberId")
+            label = name_by_id.get(member_id) if (member_id and name_by_id) else None
+            if not label:
+                label = c.get("assignedTo")
+            suffix = f" — {label}" if label else ""
         lines.append(f"• {title}{suffix}")
     return "\n".join(lines)
 
 
+def _owner_badge(item: dict[str, Any], name_by_id: dict[str, str] | None) -> str:
+    """Resolve a kid-owned item's kidId → ' [emoji name]' badge, else ''."""
+    kid_id = item.get("kidId")
+    if kid_id and name_by_id:
+        label = name_by_id.get(kid_id)
+        if label:
+            return f" [{label}]"
+    return ""
+
+
 def _format_notes_query_reply(
-    notes: list[dict[str, Any]], *, pinned_only: bool = False
+    notes: list[dict[str, Any]],
+    *,
+    pinned_only: bool = False,
+    name_by_id: dict[str, str] | None = None,
 ) -> str:
     visible = [n for n in notes if n.get("pinned")] if pinned_only else notes
     if not visible:
@@ -279,18 +322,23 @@ def _format_notes_query_reply(
         pin = "📌 " if n.get("pinned") else ""
         title = n.get("title")
         body = n.get("body", "")
+        owner = _owner_badge(n, name_by_id)
         # Use title if available, otherwise truncate body.
         if title:
-            lines.append(f"• {pin}{title}: {body[:60]}{'…' if len(body) > 60 else ''}")
+            lines.append(f"• {pin}{title}: {body[:60]}{'…' if len(body) > 60 else ''}{owner}")
         else:
-            lines.append(f"• {pin}{body[:80]}{'…' if len(body) > 80 else ''}")
+            lines.append(f"• {pin}{body[:80]}{'…' if len(body) > 80 else ''}{owner}")
     return "\n".join(lines)
 
 
 _STATUS_HE = {"idea": "רעיון 💡", "in_progress": "בעבודה 🔨", "done": "הושלם ✅"}
 
 
-def _format_projects_query_reply(projects: list[dict[str, Any]]) -> str:
+def _format_projects_query_reply(
+    projects: list[dict[str, Any]],
+    *,
+    name_by_id: dict[str, str] | None = None,
+) -> str:
     if not projects:
         return "🗂️ אין פרוייקטים פעילים."
     lines = ["🗂️ פרוייקטים:"]
@@ -298,7 +346,10 @@ def _format_projects_query_reply(projects: list[dict[str, Any]]) -> str:
         status_label = _STATUS_HE.get(p.get("status") or "in_progress", "")
         progress = p.get("progress")
         progress_str = f" ({progress}%)" if isinstance(progress, int) and progress > 0 else ""
-        lines.append(f"• {p.get('title', '(ללא כותרת)')} — {status_label}{progress_str}")
+        owner = _owner_badge(p, name_by_id)
+        lines.append(
+            f"• {p.get('title', '(ללא כותרת)')} — {status_label}{progress_str}{owner}"
+        )
     return "\n".join(lines)
 
 
@@ -412,14 +463,7 @@ async def _handle_text_message(
             if fetch_schedule:
                 schedule_blocks = results[3] if not isinstance(results[3], Exception) else []
 
-            # Build id → "emoji name" map for both kids and members.
-            name_by_id: dict[str, str] = {}
-            for k in kids_list:
-                emoji = k.get("emoji") or "👦"
-                name_by_id[k["id"]] = f"{emoji} {k['name']}"
-            for m in members_list:
-                emoji = m.get("avatarEmoji") or "👤"
-                name_by_id[m["id"]] = f"{emoji} {m['displayName']}"
+            name_by_id = _build_name_map(kids_list, members_list)
 
             return _format_events_query_reply(
                 parsed.range,
@@ -446,12 +490,28 @@ async def _handle_text_message(
                     mine_hint = (
                         "\n\n💡 כדי לסנן רק למשימות שלך, בחר מי אתה עם הפקודה /me"
                     )
-            chores = await family_os_client.list_chores(
-                family_id,
-                assignee_member_id=assignee_filter,
-                selected_for_today=parsed.today or None,
+            # Fetch chores + members in parallel so unscoped lists can label
+            # each chore with its assignee's name (app-assigned chores carry
+            # only assignedToMemberId, not free text).
+            chores_res, members_res = await asyncio.gather(
+                family_os_client.list_chores(
+                    family_id,
+                    assignee_member_id=assignee_filter,
+                    selected_for_today=parsed.today or None,
+                ),
+                family_os_client.list_members(family_id),
+                return_exceptions=True,
             )
-            return _format_chores_query_reply(chores, scoped=parsed.mine) + mine_hint
+            if isinstance(chores_res, Exception):
+                raise chores_res
+            members_list = members_res if not isinstance(members_res, Exception) else []
+            name_by_id = _build_name_map(None, members_list)
+            return (
+                _format_chores_query_reply(
+                    chores_res, scoped=parsed.mine, name_by_id=name_by_id
+                )
+                + mine_hint
+            )
 
         if isinstance(parsed, ProjectIntent):
             await family_os_client.create_project(
@@ -462,13 +522,33 @@ async def _handle_text_message(
             return _format_project_created_reply(parsed)
 
         if isinstance(parsed, QueryNotesIntent):
-            notes = await family_os_client.list_notes(family_id)
-            return _format_notes_query_reply(notes, pinned_only=parsed.pinned_only)
+            # Notes are kid-owned (kidId) or family-wide. Fetch kids alongside
+            # so kid-owned notes get a name badge.
+            notes_res, kids_res = await asyncio.gather(
+                family_os_client.list_notes(family_id),
+                family_os_client.list_kids(family_id),
+                return_exceptions=True,
+            )
+            if isinstance(notes_res, Exception):
+                raise notes_res
+            kids_list = kids_res if not isinstance(kids_res, Exception) else []
+            name_by_id = _build_name_map(kids_list, None)
+            return _format_notes_query_reply(
+                notes_res, pinned_only=parsed.pinned_only, name_by_id=name_by_id
+            )
 
         if isinstance(parsed, QueryProjectsIntent):
             status_param = "all" if parsed.include_done else "active"
-            projects = await family_os_client.list_projects(family_id, status=status_param)
-            return _format_projects_query_reply(projects)
+            projects_res, kids_res = await asyncio.gather(
+                family_os_client.list_projects(family_id, status=status_param),
+                family_os_client.list_kids(family_id),
+                return_exceptions=True,
+            )
+            if isinstance(projects_res, Exception):
+                raise projects_res
+            kids_list = kids_res if not isinstance(kids_res, Exception) else []
+            name_by_id = _build_name_map(kids_list, None)
+            return _format_projects_query_reply(projects_res, name_by_id=name_by_id)
     except httpx.HTTPStatusError as exc:
         log.warning("family-os API %s: %s", exc.response.status_code, exc.response.text[:200])
         return (
