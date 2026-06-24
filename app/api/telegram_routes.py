@@ -317,17 +317,24 @@ def _format_notes_query_reply(
     *,
     pinned_only: bool = False,
     name_by_id: dict[str, str] | None = None,
+    kid_name: str | None = None,
 ) -> str:
     visible = [n for n in notes if n.get("pinned")] if pinned_only else notes
+    scope = f" של {kid_name}" if kid_name else ""
     if not visible:
-        return "📝 אין פתקים שמורים." if not pinned_only else "📝 אין פתקים מוצמדים."
-    header = "📝 פתקים מוצמדים:" if pinned_only else "📝 פתקים שמורים:"
+        return (
+            f"📝 אין פתקים מוצמדים{scope}."
+            if pinned_only
+            else f"📝 אין פתקים שמורים{scope}."
+        )
+    header = f"📝 פתקים מוצמדים{scope}:" if pinned_only else f"📝 פתקים שמורים{scope}:"
     lines = [header]
     for n in visible:
         pin = "📌 " if n.get("pinned") else ""
         title = n.get("title")
         body = n.get("body", "")
-        owner = _owner_badge(n, name_by_id)
+        # Owner badge only in the family-wide view (kid-scoped is implied).
+        owner = "" if kid_name else _owner_badge(n, name_by_id)
         # Use title if available, otherwise truncate body.
         if title:
             lines.append(f"• {pin}{title}: {body[:60]}{'…' if len(body) > 60 else ''}{owner}")
@@ -343,15 +350,18 @@ def _format_projects_query_reply(
     projects: list[dict[str, Any]],
     *,
     name_by_id: dict[str, str] | None = None,
+    kid_name: str | None = None,
 ) -> str:
+    scope = f" של {kid_name}" if kid_name else ""
     if not projects:
-        return "🗂️ אין פרוייקטים פעילים."
-    lines = ["🗂️ פרוייקטים:"]
+        return f"🗂️ אין פרוייקטים פעילים{scope}."
+    lines = [f"🗂️ פרוייקטים{scope}:"]
     for p in projects:
         status_label = _STATUS_HE.get(p.get("status") or "in_progress", "")
         progress = p.get("progress")
         progress_str = f" ({progress}%)" if isinstance(progress, int) and progress > 0 else ""
-        owner = _owner_badge(p, name_by_id)
+        # Owner badge only in the family-wide view (kid-scoped is implied).
+        owner = "" if kid_name else _owner_badge(p, name_by_id)
         lines.append(
             f"• {p.get('title', '(ללא כותרת)')} — {status_label}{progress_str}{owner}"
         )
@@ -608,9 +618,10 @@ async def _handle_text_message(
 
         if isinstance(parsed, QueryNotesIntent):
             # Notes are kid-owned (kidId) or family-wide. Fetch kids alongside
-            # so kid-owned notes get a name badge.
+            # so kid-owned notes get a name badge. When kid_name is set, the
+            # server filters to that kid's notes.
             notes_res, kids_res = await asyncio.gather(
-                family_os_client.list_notes(family_id),
+                family_os_client.list_notes(family_id, kid_name=parsed.kid_name),
                 family_os_client.list_kids(family_id),
                 return_exceptions=True,
             )
@@ -619,13 +630,18 @@ async def _handle_text_message(
             kids_list = kids_res if not isinstance(kids_res, Exception) else []
             name_by_id = _build_name_map(kids_list, None)
             return _format_notes_query_reply(
-                notes_res, pinned_only=parsed.pinned_only, name_by_id=name_by_id
+                notes_res,
+                pinned_only=parsed.pinned_only,
+                name_by_id=name_by_id,
+                kid_name=parsed.kid_name,
             )
 
         if isinstance(parsed, QueryProjectsIntent):
             status_param = "all" if parsed.include_done else "active"
             projects_res, kids_res = await asyncio.gather(
-                family_os_client.list_projects(family_id, status=status_param),
+                family_os_client.list_projects(
+                    family_id, status=status_param, kid_name=parsed.kid_name
+                ),
                 family_os_client.list_kids(family_id),
                 return_exceptions=True,
             )
@@ -633,7 +649,9 @@ async def _handle_text_message(
                 raise projects_res
             kids_list = kids_res if not isinstance(kids_res, Exception) else []
             name_by_id = _build_name_map(kids_list, None)
-            return _format_projects_query_reply(projects_res, name_by_id=name_by_id)
+            return _format_projects_query_reply(
+                projects_res, name_by_id=name_by_id, kid_name=parsed.kid_name
+            )
 
         if isinstance(parsed, PaymentIntent):
             await family_os_client.create_payment(

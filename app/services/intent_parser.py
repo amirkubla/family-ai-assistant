@@ -111,12 +111,18 @@ class QueryNotesIntent(BaseModel):
     intent: Literal["query_notes"] = "query_notes"
     # pinned_only: true when the user specifically asks about pinned/important notes.
     pinned_only: bool = False
+    # Optional kid scope ("של אורית", "של דני"). Notes can be kid-owned; when set
+    # the bot filters to that kid's notes. Strip prefixes like query_events.
+    kid_name: str | None = None
 
 
 class QueryProjectsIntent(BaseModel):
     intent: Literal["query_projects"] = "query_projects"
     # include_done: true when the user explicitly asks about finished projects.
     include_done: bool = False
+    # Optional kid scope ("של אורית", "של דני"). Projects can be kid-owned; when
+    # set the bot filters to that kid's projects. Strip prefixes like query_events.
+    kid_name: str | None = None
 
 
 class PaymentIntent(BaseModel):
@@ -378,11 +384,14 @@ Intents:
    Fields:
      pinned_only — true ONLY if the user asked specifically about pinned /
                    starred / important notes. Default false.
+     kid_name    — Hebrew kid name, ONLY when the user scoped to a kid
+                   ("של אורית", "של דני", "הפתקים של נועה"). Strip prefixes:
+                   "של אורית" → "אורית". Leave null otherwise.
    Examples:
-     "אילו פתקים יש לנו?"   → {"intent":"query_notes","pinned_only":false}
-     "מה הפתקים שלנו?"      → {"intent":"query_notes","pinned_only":false}
-     "תראה לי את הפתקים"   → {"intent":"query_notes","pinned_only":false}
-     "מה הפתקים הפיננסיים?" → {"intent":"query_notes","pinned_only":false}
+     "אילו פתקים יש לנו?"      → {"intent":"query_notes","pinned_only":false}
+     "מה הפתקים שלנו?"         → {"intent":"query_notes","pinned_only":false}
+     "תראה לי את הפתקים"      → {"intent":"query_notes","pinned_only":false}
+     "מה הפתקים של אורית?"    → {"intent":"query_notes","pinned_only":false,"kid_name":"אורית"}
 
 10. "query_projects" — the user is ASKING about family projects.
     Triggers: question words combined with project words ("פרוייקטים",
@@ -390,10 +399,14 @@ Intents:
     Fields:
       include_done — true if the user asked about finished / done projects.
                      Default false (active projects only).
+      kid_name     — Hebrew kid name, ONLY when the user scoped to a kid
+                     ("של אורית", "של שלומי", "הפרוייקטים של דני"). Strip
+                     prefixes: "של אורית" → "אורית". Leave null otherwise.
     Examples:
-      "מה הפרוייקטים שלנו?"     → {"intent":"query_projects","include_done":false}
-      "אילו פרוייקטים פעילים?"  → {"intent":"query_projects","include_done":false}
-      "מה הפרוייקטים שסיימנו?"  → {"intent":"query_projects","include_done":true}
+      "מה הפרוייקטים שלנו?"        → {"intent":"query_projects","include_done":false}
+      "אילו פרוייקטים פעילים?"     → {"intent":"query_projects","include_done":false}
+      "מה הפרוייקטים שסיימנו?"     → {"intent":"query_projects","include_done":true}
+      "מה הפרוייקטים של אורית?"   → {"intent":"query_projects","include_done":false,"kid_name":"אורית"}
 
 11. "payment" — the user wants to add a KID PAYMENT: money owed for a specific
     kid (a class fee, tuition, an activity), with an amount in shekels. Always

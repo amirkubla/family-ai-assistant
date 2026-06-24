@@ -238,21 +238,35 @@ class FamilyOsClient:
             r.raise_for_status()
             return r.json()
 
-    async def list_notes(self, family_id: str) -> list[dict[str, Any]]:
-        """List family notes sorted pinned-first (id, title, body, pinned)."""
+    async def list_notes(
+        self, family_id: str, *, kid_name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        List family notes sorted pinned-first (id, title, body, pinned, kidId).
+        `kid_name` optionally scopes to one kid's notes (kid-owned via kidId).
+        """
         url = f"{self._base}/v1/internal/family/{family_id}/notes"
+        params: dict[str, str] = {}
+        if kid_name is not None:
+            params["kidName"] = kid_name
         async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.get(url, headers=self._headers())
+            r = await c.get(url, headers=self._headers(), params=params)
             r.raise_for_status()
             return r.json()
 
     async def list_projects(
-        self, family_id: str, *, status: str = "active"
+        self, family_id: str, *, status: str = "active", kid_name: str | None = None
     ) -> list[dict[str, Any]]:
-        """`status`: 'active' (default, idea+in_progress) / 'done' / 'all'."""
+        """
+        `status`: 'active' (default, idea+in_progress) / 'done' / 'all'.
+        `kid_name` optionally scopes to one kid's projects (kid-owned via kidId).
+        """
         url = f"{self._base}/v1/internal/family/{family_id}/projects"
+        params: dict[str, str] = {"status": status}
+        if kid_name is not None:
+            params["kidName"] = kid_name
         async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.get(url, headers=self._headers(), params={"status": status})
+            r = await c.get(url, headers=self._headers(), params=params)
             r.raise_for_status()
             return r.json()
 
