@@ -99,6 +99,26 @@ class QueryChoresIntent(BaseModel):
     today: bool = False
 
 
+class ProjectIntent(BaseModel):
+    intent: Literal["project"] = "project"
+    title: str
+    # Default to in_progress — if the user is telling the bot about a project
+    # they want to start, it's more likely active than just an idea.
+    status: Literal["idea", "in_progress"] = "in_progress"
+
+
+class QueryNotesIntent(BaseModel):
+    intent: Literal["query_notes"] = "query_notes"
+    # pinned_only: true when the user specifically asks about pinned/important notes.
+    pinned_only: bool = False
+
+
+class QueryProjectsIntent(BaseModel):
+    intent: Literal["query_projects"] = "query_projects"
+    # include_done: true when the user explicitly asks about finished projects.
+    include_done: bool = False
+
+
 class UnsupportedIntent(BaseModel):
     intent: Literal["unsupported"] = "unsupported"
     reason: str
@@ -110,9 +130,12 @@ ParsedIntent = (
     | GroceryIntent
     | ChoreIntent
     | NoteIntent
+    | ProjectIntent
     | QueryEventsIntent
     | QueryGroceryIntent
     | QueryChoresIntent
+    | QueryNotesIntent
+    | QueryProjectsIntent
     | UnsupportedIntent
 )
 
@@ -125,8 +148,9 @@ from the list below and emit JSON matching that intent's schema.
 
 CRITICAL: every response MUST include a top-level "intent" field whose value
 is EXACTLY one of:
-  "family_event" | "grocery" | "chore" | "note" |
-  "query_events" | "query_grocery" | "query_chores" | "unsupported"
+  "family_event" | "grocery" | "chore" | "note" | "project" |
+  "query_events" | "query_grocery" | "query_chores" |
+  "query_notes" | "query_projects" | "unsupported"
 
 If you omit the "intent" field the bot cannot route the message and the
 user gets a generic error. Always include it, in every example, on every
@@ -282,13 +306,51 @@ Intents:
      "מה צריך לעשות היום בבית?" →
        {"intent":"query_chores","mine":false,"today":true}
 
-8. "unsupported" — the request is something else (projects, kids' schedules,
-   general chat, deleting/updating existing items).
-   Field:
-     reason — short Hebrew message the bot will show the user.
-   Example:
-     "מה מזג האוויר?" →
-       {"intent":"unsupported","reason":"אני יודע להוסיף ולשאול לגבי אירועים, קניות, משימות ופתקים — שאר הדברים עוד לא."}
+8. "project" — the user wants to add a project (something bigger than a chore,
+   with a title and optional status). Distinguish from "chore" by scope words
+   ("פרוייקט", "מיזם", "תוכנית", "שיפוץ", "בנייה", "ארגון", "פרויקט").
+   Fields:
+     title  — short Hebrew title (4–60 chars).
+     status — ONE of "idea" / "in_progress". Default "in_progress". Use "idea"
+              when the user says "רעיון" / "חולם על" / "אולי" / "בעתיד".
+   Examples:
+     "תוסיף פרוייקט: שיפוץ סלון" →
+       {"intent":"project","title":"שיפוץ סלון","status":"in_progress"}
+     "יש לי רעיון לפרוייקט: גינה על הגג" →
+       {"intent":"project","title":"גינה על הגג","status":"idea"}
+     "אנחנו מתחילים פרוייקט סידור ארכיון" →
+       {"intent":"project","title":"סידור ארכיון","status":"in_progress"}
+
+9. "query_notes" — the user is ASKING about saved notes / reminders.
+   Triggers: question words combined with note words ("פתקים", "תזכורות",
+   "מה רשמנו", "מה שמרנו", "מה כתוב").
+   Fields:
+     pinned_only — true ONLY if the user asked specifically about pinned /
+                   starred / important notes. Default false.
+   Examples:
+     "אילו פתקים יש לנו?"   → {"intent":"query_notes","pinned_only":false}
+     "מה הפתקים שלנו?"      → {"intent":"query_notes","pinned_only":false}
+     "תראה לי את הפתקים"   → {"intent":"query_notes","pinned_only":false}
+     "מה הפתקים הפיננסיים?" → {"intent":"query_notes","pinned_only":false}
+
+10. "query_projects" — the user is ASKING about family projects.
+    Triggers: question words combined with project words ("פרוייקטים",
+    "פרויקטים", "מיזמים", "תוכניות", "מה עובדים על").
+    Fields:
+      include_done — true if the user asked about finished / done projects.
+                     Default false (active projects only).
+    Examples:
+      "מה הפרוייקטים שלנו?"     → {"intent":"query_projects","include_done":false}
+      "אילו פרוייקטים פעילים?"  → {"intent":"query_projects","include_done":false}
+      "מה הפרוייקטים שסיימנו?"  → {"intent":"query_projects","include_done":true}
+
+11. "unsupported" — the request is something else (kids' schedules,
+    general chat, deleting/updating existing items, weather, budget).
+    Field:
+      reason — short Hebrew message the bot will show the user.
+    Example:
+      "מה מזג האוויר?" →
+        {"intent":"unsupported","reason":"אני יודע להוסיף ולשאול לגבי אירועים, קניות, משימות, פתקים ופרוייקטים — שאר הדברים עוד לא."}
 
 Rules:
 - ALWAYS return valid JSON matching ONE of the schemas above.
@@ -360,12 +422,18 @@ async def parse_intent(text: str) -> ParsedIntent:
             return ChoreIntent.model_validate(raw)
         if intent == "note":
             return NoteIntent.model_validate(raw)
+        if intent == "project":
+            return ProjectIntent.model_validate(raw)
         if intent == "query_events":
             return QueryEventsIntent.model_validate(raw)
         if intent == "query_grocery":
             return QueryGroceryIntent.model_validate(raw)
         if intent == "query_chores":
             return QueryChoresIntent.model_validate(raw)
+        if intent == "query_notes":
+            return QueryNotesIntent.model_validate(raw)
+        if intent == "query_projects":
+            return QueryProjectsIntent.model_validate(raw)
         if intent == "unsupported":
             return UnsupportedIntent.model_validate(raw)
     except Exception as exc:  # noqa: BLE001
@@ -389,6 +457,9 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
       start_minutes / end_minutes  → family_event  (chore has no time)
       range                        → query_events  (chore has no range)
       mine / today                 → query_chores
+      pinned_only                  → query_notes
+      include_done                 → query_projects
+      status (+ title)             → project  (chore has no status field)
       assigned_to or just title    → chore
       only `reason`                → unsupported
     """
@@ -403,13 +474,17 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
         return "query_events"
     if "mine" in keys or "today" in keys:
         return "query_chores"
+    if "pinned_only" in keys:
+        return "query_notes"
+    if "include_done" in keys:
+        return "query_projects"
     if "assigned_to" in keys:
         return "chore"
     if keys == {"reason"} or keys == {"reason", "intent"}:
         return "unsupported"
-    # `title` alone is ambiguous between chore and family_event; if we got
-    # here neither time nor assignee was present, lean chore (the safer
-    # default — a missed time is more recoverable than a missed reminder).
+    # `status` with `title` is a project; `title` alone leans chore.
+    if "status" in keys and "title" in keys:
+        return "project"
     if "title" in keys:
         return "chore"
     return None

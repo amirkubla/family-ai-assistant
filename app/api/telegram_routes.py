@@ -38,9 +38,12 @@ from app.services.intent_parser import (
     FamilyEventIntent,
     GroceryIntent,
     NoteIntent,
+    ProjectIntent,
     QueryChoresIntent,
     QueryEventsIntent,
     QueryGroceryIntent,
+    QueryNotesIntent,
+    QueryProjectsIntent,
     UnsupportedIntent,
     parse_intent,
 )
@@ -264,6 +267,46 @@ def _format_chores_query_reply(
     return "\n".join(lines)
 
 
+def _format_notes_query_reply(
+    notes: list[dict[str, Any]], *, pinned_only: bool = False
+) -> str:
+    visible = [n for n in notes if n.get("pinned")] if pinned_only else notes
+    if not visible:
+        return "📝 אין פתקים שמורים." if not pinned_only else "📝 אין פתקים מוצמדים."
+    header = "📝 פתקים מוצמדים:" if pinned_only else "📝 פתקים שמורים:"
+    lines = [header]
+    for n in visible:
+        pin = "📌 " if n.get("pinned") else ""
+        title = n.get("title")
+        body = n.get("body", "")
+        # Use title if available, otherwise truncate body.
+        if title:
+            lines.append(f"• {pin}{title}: {body[:60]}{'…' if len(body) > 60 else ''}")
+        else:
+            lines.append(f"• {pin}{body[:80]}{'…' if len(body) > 80 else ''}")
+    return "\n".join(lines)
+
+
+_STATUS_HE = {"idea": "רעיון 💡", "in_progress": "בעבודה 🔨", "done": "הושלם ✅"}
+
+
+def _format_projects_query_reply(projects: list[dict[str, Any]]) -> str:
+    if not projects:
+        return "🗂️ אין פרוייקטים פעילים."
+    lines = ["🗂️ פרוייקטים:"]
+    for p in projects:
+        status_label = _STATUS_HE.get(p.get("status") or "in_progress", "")
+        progress = p.get("progress")
+        progress_str = f" ({progress}%)" if isinstance(progress, int) and progress > 0 else ""
+        lines.append(f"• {p.get('title', '(ללא כותרת)')} — {status_label}{progress_str}")
+    return "\n".join(lines)
+
+
+def _format_project_created_reply(intent: ProjectIntent) -> str:
+    status_label = _STATUS_HE.get(intent.status, "")
+    return f"🗂️ נוצר פרוייקט: {intent.title}\n{status_label}"
+
+
 def _format_grocery_reply(intent: GroceryIntent) -> str:
     if len(intent.items) == 1:
         it = intent.items[0]
@@ -409,6 +452,23 @@ async def _handle_text_message(
                 selected_for_today=parsed.today or None,
             )
             return _format_chores_query_reply(chores, scoped=parsed.mine) + mine_hint
+
+        if isinstance(parsed, ProjectIntent):
+            await family_os_client.create_project(
+                family_id,
+                title=parsed.title,
+                status=parsed.status,
+            )
+            return _format_project_created_reply(parsed)
+
+        if isinstance(parsed, QueryNotesIntent):
+            notes = await family_os_client.list_notes(family_id)
+            return _format_notes_query_reply(notes, pinned_only=parsed.pinned_only)
+
+        if isinstance(parsed, QueryProjectsIntent):
+            status_param = "all" if parsed.include_done else "active"
+            projects = await family_os_client.list_projects(family_id, status=status_param)
+            return _format_projects_query_reply(projects)
     except httpx.HTTPStatusError as exc:
         log.warning("family-os API %s: %s", exc.response.status_code, exc.response.text[:200])
         return (
@@ -484,7 +544,9 @@ async def telegram_webhook(
                 "• \"תוסיף חלב וביצים לקניות\"\n"
                 "• \"תזכיר לעודד להוציא את הזבל\"\n"
                 "• \"תרשום פתק שהמפתחות אצל השכן\"\n"
+                "• \"תוסיף פרוייקט: שיפוץ סלון\"\n"
                 "• \"מה יש לי היום?\" / \"מה ברשימת הקניות?\"\n"
+                "• \"אילו פתקים יש לנו?\" / \"מה הפרוייקטים שלנו?\"\n"
                 "\n"
                 "💡 כדאי לרשום /me כדי לבחור מי אתה במשפחה — "
                 "אחר כך אדע לסנן שאלות כמו \"המשימות שלי\".",
@@ -500,7 +562,9 @@ async def telegram_webhook(
             "• להוסיף לקניות: \"תוסיף לחם וחלב לרשימה\"\n"
             "• להוסיף משימה: \"תזכיר לעודד להוציא את הזבל\"\n"
             "• לרשום פתק: \"תרשום שהמפתחות אצל השכן\"\n"
+            "• להוסיף פרוייקט: \"תוסיף פרוייקט: שיפוץ חדר\"\n"
             "• לשאול: \"מה יש לי היום?\" / \"מה ברשימת הקניות?\" / \"מה המשימות?\"\n"
+            "• \"אילו פתקים יש לנו?\" / \"מה הפרוייקטים שלנו?\"\n"
             "\n"
             "פקודות:\n"
             "• /me        — בחר מי אתה במשפחה (בשביל שאלות אישיות כמו \"המשימות שלי\")",

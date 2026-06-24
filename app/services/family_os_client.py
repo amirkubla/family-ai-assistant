@@ -238,5 +238,37 @@ class FamilyOsClient:
             r.raise_for_status()
             return r.json()
 
+    async def list_notes(self, family_id: str) -> list[dict[str, Any]]:
+        """List family notes sorted pinned-first (id, title, body, pinned)."""
+        url = f"{self._base}/v1/internal/family/{family_id}/notes"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(url, headers=self._headers())
+            r.raise_for_status()
+            return r.json()
+
+    async def list_projects(
+        self, family_id: str, *, status: str = "active"
+    ) -> list[dict[str, Any]]:
+        """`status`: 'active' (default, idea+in_progress) / 'done' / 'all'."""
+        url = f"{self._base}/v1/internal/family/{family_id}/projects"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(url, headers=self._headers(), params={"status": status})
+            r.raise_for_status()
+            return r.json()
+
+    async def create_project(
+        self,
+        family_id: str,
+        *,
+        title: str,
+        status: str = "in_progress",
+    ) -> dict[str, Any]:
+        """Create a new family project."""
+        url = f"{self._base}/v1/internal/family/{family_id}/projects"
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(url, headers=self._headers(), json={"title": title, "status": status})
+            r.raise_for_status()
+            return r.json()
+
 
 family_os_client = FamilyOsClient()
