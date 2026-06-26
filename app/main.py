@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -14,6 +15,12 @@ from app.api import task_routes
 from app.api import reminder_routes
 from app.api import recurring_pattern_routes
 from app.api import telegram_routes
+
+# App-level logging at INFO. uvicorn doesn't configure the root logger, so
+# without this our logging.getLogger(__name__).info(...) calls are dropped
+# (only WARNING+ reaches the last-resort handler). Enables observability for
+# the bot intent/brain flow.
+logging.basicConfig(level=logging.INFO)
 
 
 @asynccontextmanager
