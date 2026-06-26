@@ -33,10 +33,12 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.services import telegram_service
 from app.services.family_os_client import family_os_client
+from app.services.brain import answer_family_question
 from app.services.intent_parser import (
     ChoreIntent,
     ExpenseIntent,
     FamilyEventIntent,
+    GeneralQueryIntent,
     GroceryIntent,
     NoteIntent,
     PaymentIntent,
@@ -735,6 +737,10 @@ async def _handle_text_message(
             return _format_budget_query_reply(
                 res.get("month", ""), res.get("expenses", [])
             )
+
+        if isinstance(parsed, GeneralQueryIntent):
+            # Family brain: free-form question answered over the full snapshot.
+            return await answer_family_question(family_id, parsed.question)
     except httpx.HTTPStatusError as exc:
         log.warning("family-os API %s: %s", exc.response.status_code, exc.response.text[:200])
         return (
@@ -816,6 +822,11 @@ async def telegram_webhook(
                 "• \"מה יש לי היום?\" / \"מה ברשימת הקניות?\"\n"
                 "• \"מה התשלומים?\" / \"כמה הוצאנו החודש?\"\n"
                 "\n"
+                "🧠 אפשר גם פשוט לשאול אותי כל דבר על המשפחה — "
+                "\"תן לי סיכום של היום\", \"מי הכי עמוס השבוע?\", "
+                "\"מה אנחנו יודעים על הטיול לאילת?\". "
+                "ככל שתרשמו יותר פתקים, אדע לענות על יותר.\n"
+                "\n"
                 "💡 כדאי לרשום /me כדי לבחור מי אתה במשפחה — "
                 "אחר כך אדע לסנן שאלות כמו \"המשימות שלי\".",
             )
@@ -836,6 +847,9 @@ async def telegram_webhook(
             "• לסמן ששולם: \"שילמתי את חוג הציור של דני\"\n"
             "• לשאול: \"מה יש לי היום?\" / \"מה ברשימת הקניות?\" / \"מה המשימות?\"\n"
             "• \"אילו פתקים יש לנו?\" / \"מה הפרוייקטים?\" / \"מה התשלומים?\" / \"כמה הוצאנו החודש?\"\n"
+            "\n"
+            "🧠 ואפשר פשוט לשאול אותי כל דבר על המשפחה — סיכומים, מי עמוס,"
+            " מה תכננו, או כל מה שרשום בפתקים.\n"
             "\n"
             "פקודות:\n"
             "• /me        — בחר מי אתה במשפחה (בשביל שאלות אישיות כמו \"המשימות שלי\")",

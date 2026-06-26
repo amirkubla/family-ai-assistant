@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # ── OpenAI (intent extraction) ──
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    # Stronger model for the "family brain" free-form Q&A over the full family
+    # snapshot (more reasoning headroom than the cheap intent-extraction model).
+    openai_brain_model: str = "gpt-4o"
 
     # ── family-os REST API (the bot calls this to create events/grocery) ──
     family_os_api_url: str = "https://family-os-4ilvxexrha-zf.a.run.app"

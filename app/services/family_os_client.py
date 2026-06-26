@@ -380,5 +380,20 @@ class FamilyOsClient:
             r.raise_for_status()
             return r.json()
 
+    # ── family brain ─────────────────────────────────────────────────────────
+
+    async def get_snapshot(self, family_id: str) -> dict[str, Any]:
+        """
+        One name-resolved digest of the whole family (notes, projects, events,
+        chores, grocery, payments, schedule, spending) for the general_query
+        brain. See family-os snapshotService.ts.
+        """
+        url = f"{self._base}/v1/internal/family/{family_id}/snapshot"
+        # Larger timeout: composes several reads server-side.
+        async with httpx.AsyncClient(timeout=25.0) as c:
+            r = await c.get(url, headers=self._headers())
+            r.raise_for_status()
+            return r.json()
+
 
 family_os_client = FamilyOsClient()

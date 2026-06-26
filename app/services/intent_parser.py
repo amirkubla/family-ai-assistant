@@ -169,6 +169,14 @@ class QueryBudgetIntent(BaseModel):
     period: Literal["month"] = "month"
 
 
+class GeneralQueryIntent(BaseModel):
+    intent: Literal["general_query"] = "general_query"
+    # A free-form question ABOUT the family that no specific intent covers.
+    # Answered by the "family brain" over the full family snapshot. The user's
+    # question is copied verbatim (Hebrew) for the brain to answer.
+    question: str
+
+
 class UnsupportedIntent(BaseModel):
     intent: Literal["unsupported"] = "unsupported"
     reason: str
@@ -191,6 +199,7 @@ ParsedIntent = (
     | QueryPaymentsIntent
     | QueryBudgetIntent
     | PayPaymentIntent
+    | GeneralQueryIntent
     | UnsupportedIntent
 )
 
@@ -207,7 +216,7 @@ is EXACTLY one of:
   "payment" | "expense" |
   "query_events" | "query_grocery" | "query_chores" |
   "query_notes" | "query_projects" | "query_payments" | "query_budget" |
-  "pay_payment" | "unsupported"
+  "pay_payment" | "general_query" | "unsupported"
 
 If you omit the "intent" field the bot cannot route the message and the
 user gets a generic error. Always include it, in every example, on every
@@ -477,13 +486,36 @@ Intents:
       "כמה הוצאנו החודש?"  → {"intent":"query_budget","period":"month"}
       "מה ההוצאות החודש?"  → {"intent":"query_budget","period":"month"}
 
-16. "unsupported" — the request is something else (kids' schedules,
-    general chat, deleting/updating existing items, weather).
+16. "general_query" — the user is ASKING a free-form question ABOUT THE FAMILY
+    that none of the specific query intents (5,6,7,9,10,13,15) cleanly cover:
+    a summary, a cross-topic question, reasoning over the family's info, or
+    recalling something that might be written in a note. This is the catch-all
+    for genuine questions about the family's own life/data. When the message is
+    a question about the family and you're unsure which specific intent fits,
+    PREFER general_query over unsupported.
+    Field:
+      question — the user's question, copied VERBATIM in Hebrew.
+    Examples:
+      "תן לי סיכום של היום" →
+        {"intent":"general_query","question":"תן לי סיכום של היום"}
+      "מי הכי עמוס השבוע?" →
+        {"intent":"general_query","question":"מי הכי עמוס השבוע?"}
+      "מתי בא השרברב?" →
+        {"intent":"general_query","question":"מתי בא השרברב?"}
+      "מה אנחנו יודעים על הטיול לאילת?" →
+        {"intent":"general_query","question":"מה אנחנו יודעים על הטיול לאילת?"}
+      "כמה עוד נשאר לשלם על החוגים של הילדים?" →
+        {"intent":"general_query","question":"כמה עוד נשאר לשלם על החוגים של הילדים?"}
+
+17. "unsupported" — the request is NOT about the family's data at all: general
+    world knowledge, weather, chit-chat, or an action we can't do yet
+    (deleting/updating existing items). Do NOT use this for questions about the
+    family — those are general_query.
     Field:
       reason — short Hebrew message the bot will show the user.
     Example:
       "מה מזג האוויר?" →
-        {"intent":"unsupported","reason":"אני יודע להוסיף ולשאול לגבי אירועים, קניות, משימות, פתקים, פרוייקטים, תשלומים והוצאות — שאר הדברים עוד לא."}
+        {"intent":"unsupported","reason":"אני עוזר רק בענייני המשפחה — אירועים, משימות, קניות, פתקים, תשלומים וכו׳."}
 
 Rules:
 - ALWAYS return valid JSON matching ONE of the schemas above.
@@ -577,6 +609,8 @@ async def parse_intent(text: str) -> ParsedIntent:
             return QueryBudgetIntent.model_validate(raw)
         if intent == "pay_payment":
             return PayPaymentIntent.model_validate(raw)
+        if intent == "general_query":
+            return GeneralQueryIntent.model_validate(raw)
         if intent == "unsupported":
             return UnsupportedIntent.model_validate(raw)
     except Exception as exc:  # noqa: BLE001
@@ -608,6 +642,7 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
       status (+ title)             → project  (chore has no status field)
       assigned_to                  → chore
       note (no amount, no title)   → pay_payment  (settle by name)
+      question                     → general_query
       only `reason`                → unsupported
       title alone                  → chore
     """
@@ -641,6 +676,8 @@ def _infer_intent_from_shape(raw: dict[str, Any]) -> str | None:
     # `note` without amount/title → settling a payment by name.
     if "note" in keys:
         return "pay_payment"
+    if "question" in keys:
+        return "general_query"
     if "title" in keys:
         return "chore"
     return None
