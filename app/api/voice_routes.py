@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -66,6 +67,21 @@ _PAYMENT_SYSTEM = (
     "recurrence_type ו-recurrence_day (שבועי: 0-6 כאשר 0=ראשון; חודשי: 1-31). "
     "בחר category מתאים מתוך רשימת הקטגוריות שסופקה (מילה במילה). "
     "אם נאמר מי שילם, התאם payer לשם מרשימת בני הבית; אחרת null."
+)
+
+# Extract a calendar event from Hebrew speech.
+_EVENT_SYSTEM = (
+    "אתה מחלץ אירוע לוח-שנה מהקלטה בעברית. החזר JSON בלבד בשדות: "
+    '{"title": כותרת, "is_recurring": true/false, "date": "YYYY-MM-DD" או null, '
+    '"start_time": "HH:MM" או null, "end_time": "HH:MM" או null, '
+    '"all_day": true/false, "days_of_week": מערך מספרים 0-6, '
+    '"assignee_type": "member"|"kid"|null, "assignee_name": שם מהרשימה או null, '
+    '"location": טקסט או null, "reminders": מערך דקות-לפני}. '
+    "פתור תאריכים יחסיים ('מחר', 'יום ראשון הבא') מול שדה today שסופק. "
+    "ימים: 0=ראשון, 1=שני, ... 6=שבת. אם האירוע חוזר שבועית קבע is_recurring=true "
+    "וציין days_of_week; אחרת ציין date. אם נאמר למי שייך האירוע התאם "
+    "assignee_name לשם מרשימת ההורים (member) או הילדים (kid). reminders בדקות "
+    "לפני (חצי שעה=30, שעה=60, יום=1440)."
 )
 
 
@@ -175,6 +191,27 @@ class VoicePaymentResponse(BaseModel):
     payment: VoicePaymentData
     # Machine keys the app maps to a Hebrew "missing details" message:
     # "amount" and/or "recurrence". Empty → ready to add.
+    missing: list[str]
+
+
+class VoiceEventData(BaseModel):
+    title: str = ""
+    is_recurring: bool = False
+    date: str | None = None  # YYYY-MM-DD (one-time)
+    start_time: str | None = None  # HH:MM
+    end_time: str | None = None  # HH:MM
+    all_day: bool = False
+    days_of_week: list[int] = []  # 0-6 (0=Sun), recurring
+    assignee_type: str | None = None  # "member" | "kid"
+    assignee_name: str | None = None
+    location: str | None = None
+    reminders: list[int] = []  # minutes before
+
+
+class VoiceEventResponse(BaseModel):
+    transcript: str
+    event: VoiceEventData
+    # Machine keys: "title" | "date" | "time" | "days". Empty → ready to add.
     missing: list[str]
 
 
@@ -379,3 +416,114 @@ async def voice_payment(
         transcript, payment.amount, payment.is_recurring, missing,
     )
     return VoicePaymentResponse(transcript=transcript, payment=payment, missing=missing)
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def _clean_date(v: object) -> str | None:
+    return v if isinstance(v, str) and _DATE_RE.match(v) else None
+
+
+def _clean_time(v: object) -> str | None:
+    return v if isinstance(v, str) and _TIME_RE.match(v) else None
+
+
+async def _parse_event(
+    transcript: str, today: str, members: list[str], kids: list[str]
+) -> VoiceEventData:
+    """LLM-extract a calendar event. Empty VoiceEventData on failure."""
+    user = json.dumps(
+        {"text": transcript, "today": today, "members": members, "kids": kids},
+        ensure_ascii=False,
+    )
+    try:
+        resp = await _get_client().chat.completions.create(
+            model=get_settings().openai_model,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": _EVENT_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+        )
+        d = json.loads(resp.choices[0].message.content or "{}")
+        atype = d.get("assignee_type")
+        aname = d.get("assignee_name")
+        if atype == "member" and aname in members:
+            pass
+        elif atype == "kid" and aname in kids:
+            pass
+        else:
+            atype, aname = None, None
+        dows = sorted({x for x in (d.get("days_of_week") or []) if isinstance(x, int) and 0 <= x <= 6})
+        rems = [x for x in (d.get("reminders") or []) if isinstance(x, int) and x > 0][:3]
+        loc = str(d.get("location")).strip() if d.get("location") else ""
+        return VoiceEventData(
+            title=str(d.get("title") or "").strip(),
+            is_recurring=bool(d.get("is_recurring")),
+            date=_clean_date(d.get("date")),
+            start_time=_clean_time(d.get("start_time")),
+            end_time=_clean_time(d.get("end_time")),
+            all_day=bool(d.get("all_day")),
+            days_of_week=dows,
+            assignee_type=atype,
+            assignee_name=aname,
+            location=loc or None,
+            reminders=rems,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("event parse failed")
+        return VoiceEventData()
+
+
+def _validate_event(e: VoiceEventData) -> list[str]:
+    """Missing keys vs the family-os event API. [] = ready to add."""
+    missing: list[str] = []
+    if not e.title:
+        missing.append("title")
+    if e.is_recurring:
+        if not e.days_of_week:
+            missing.append("days")
+    else:
+        if not e.date:
+            missing.append("date")
+        if not e.all_day and not e.start_time:
+            missing.append("time")
+    return missing
+
+
+@router.post("/event", response_model=VoiceEventResponse)
+async def voice_event(
+    audio: UploadFile = File(...),
+    context: str | None = Form(None),
+) -> VoiceEventResponse:
+    """Transcribe a Hebrew clip → a calendar event draft + missing-fields check.
+
+    `context` (optional) is JSON {"today":"YYYY-MM-DD","members":[...],"kids":[...]}
+    so the LLM can resolve relative dates and match an assignee. Returns the
+    parsed event + `missing` (machine keys); the app reviews/adds it.
+    """
+    transcript = await _transcribe(audio)
+    if not transcript:
+        return VoiceEventResponse(transcript="", event=VoiceEventData(), missing=["title"])
+    today = ""
+    members: list[str] = []
+    kids: list[str] = []
+    if context:
+        try:
+            ctx = json.loads(context)
+            if isinstance(ctx, dict):
+                today = str(ctx.get("today") or "")
+                members = [str(m) for m in ctx.get("members", []) if isinstance(m, str)]
+                kids = [str(k) for k in ctx.get("kids", []) if isinstance(k, str)]
+        except (ValueError, TypeError):
+            pass
+    event = await _parse_event(transcript, today, members, kids)
+    missing = _validate_event(event)
+    logger.info(
+        "voice_event: transcript=%r recurring=%s missing=%s",
+        transcript, event.is_recurring, missing,
+    )
+    return VoiceEventResponse(transcript=transcript, event=event, missing=missing)
