@@ -49,6 +49,12 @@ _CHORE_SYSTEM = (
     'החזר JSON בלבד: {"tasks": ["...", "..."]}'
 )
 
+# Concise Hebrew project name from a free-form description.
+_PROJECT_TITLE_SYSTEM = (
+    "אתה יוצר שם קצר וברור בעברית לפרויקט על סמך תיאורו — עד 5 מילים, "
+    'ללא מירכאות וללא נקודה בסוף. החזר JSON בלבד: {"title": "..."}'
+)
+
 
 async def _transcribe(audio: UploadFile, prompt: str | None = None) -> str:
     """Transcribe a Hebrew clip to text. 400 on empty audio, 502 on failure."""
@@ -70,22 +76,22 @@ async def _transcribe(audio: UploadFile, prompt: str | None = None) -> str:
     return (getattr(result, "text", "") or "").strip()
 
 
-async def _generate_note_title(transcript: str) -> str:
-    """LLM-generated short Hebrew title for a note. Empty string on failure."""
+async def _generate_title(transcript: str, system: str) -> str:
+    """LLM-generated short Hebrew title for the given system prompt. "" on error."""
     try:
         resp = await _get_client().chat.completions.create(
             model=get_settings().openai_model,
             response_format={"type": "json_object"},
             temperature=0.2,
             messages=[
-                {"role": "system", "content": _NOTE_TITLE_SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": transcript},
             ],
         )
         data = json.loads(resp.choices[0].message.content or "{}")
         return (data.get("title") or "").strip()[:80]
     except Exception:  # noqa: BLE001 — title is optional, never fail the request
-        logger.exception("note title generation failed")
+        logger.exception("title generation failed")
         return ""
 
 
@@ -133,6 +139,12 @@ class VoiceChoreItem(BaseModel):
 class VoiceChoreResponse(BaseModel):
     transcript: str
     items: list[VoiceChoreItem]
+
+
+class VoiceProjectResponse(BaseModel):
+    transcript: str
+    title: str
+    description: str
 
 
 @router.post("/grocery", response_model=VoiceGroceryResponse)
@@ -201,7 +213,7 @@ async def voice_note(audio: UploadFile = File(...)) -> VoiceNoteResponse:
     transcript = await _transcribe(audio)
     if not transcript:
         return VoiceNoteResponse(transcript="", title="", body="")
-    title = await _generate_note_title(transcript)
+    title = await _generate_title(transcript, _NOTE_TITLE_SYSTEM)
     logger.info("voice_note: transcript=%r title=%r", transcript, title)
     return VoiceNoteResponse(transcript=transcript, title=title, body=transcript)
 
@@ -218,3 +230,18 @@ async def voice_chore(audio: UploadFile = File(...)) -> VoiceChoreResponse:
     items = [VoiceChoreItem(title=x) for x in await _extract_tasks(transcript)]
     logger.info("voice_chore: transcript=%r -> %d task(s)", transcript, len(items))
     return VoiceChoreResponse(transcript=transcript, items=items)
+
+
+@router.post("/project", response_model=VoiceProjectResponse)
+async def voice_project(audio: UploadFile = File(...)) -> VoiceProjectResponse:
+    """Transcribe a Hebrew clip → a project draft (name + description; no write).
+
+    Description is the verbatim transcript; the name is LLM-generated. The
+    family-os app opens its project editor pre-filled for review before saving.
+    """
+    transcript = await _transcribe(audio)
+    if not transcript:
+        return VoiceProjectResponse(transcript="", title="", description="")
+    title = await _generate_title(transcript, _PROJECT_TITLE_SYSTEM)
+    logger.info("voice_project: transcript=%r title=%r", transcript, title)
+    return VoiceProjectResponse(transcript=transcript, title=title, description=transcript)
