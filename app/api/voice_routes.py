@@ -55,6 +55,19 @@ _PROJECT_TITLE_SYSTEM = (
     'ללא מירכאות וללא נקודה בסוף. החזר JSON בלבד: {"title": "..."}'
 )
 
+# Extract a single payment/expense from Hebrew speech.
+_PAYMENT_SYSTEM = (
+    "אתה מחלץ תשלום/הוצאה מהקלטה בעברית. החזר JSON בלבד בשדות: "
+    '{"title": תיאור קצר, "amount": מספר בשקלים או null, '
+    '"is_recurring": true/false, "recurrence_type": "weekly"|"monthly"|null, '
+    '"recurrence_day": מספר או null, "category": שם מהרשימה או null, '
+    '"payer": שם מהרשימה או null}. '
+    "אם התשלום חוזר (כל שבוע / כל חודש) קבע is_recurring=true וציין "
+    "recurrence_type ו-recurrence_day (שבועי: 0-6 כאשר 0=ראשון; חודשי: 1-31). "
+    "בחר category מתאים מתוך רשימת הקטגוריות שסופקה (מילה במילה). "
+    "אם נאמר מי שילם, התאם payer לשם מרשימת בני הבית; אחרת null."
+)
+
 
 async def _transcribe(audio: UploadFile, prompt: str | None = None) -> str:
     """Transcribe a Hebrew clip to text. 400 on empty audio, 502 on failure."""
@@ -145,6 +158,24 @@ class VoiceProjectResponse(BaseModel):
     transcript: str
     title: str
     description: str
+
+
+class VoicePaymentData(BaseModel):
+    title: str = ""
+    amount: float | None = None  # shekels (NIS); the app converts to agorot
+    is_recurring: bool = False
+    recurrence_type: str | None = None  # "weekly" | "monthly"
+    recurrence_day: int | None = None  # 0-6 weekly (0=Sun) | 1-31 monthly
+    category: str | None = None
+    payer: str | None = None
+
+
+class VoicePaymentResponse(BaseModel):
+    transcript: str
+    payment: VoicePaymentData
+    # Machine keys the app maps to a Hebrew "missing details" message:
+    # "amount" and/or "recurrence". Empty → ready to add.
+    missing: list[str]
 
 
 @router.post("/grocery", response_model=VoiceGroceryResponse)
@@ -245,3 +276,106 @@ async def voice_project(audio: UploadFile = File(...)) -> VoiceProjectResponse:
     title = await _generate_title(transcript, _PROJECT_TITLE_SYSTEM)
     logger.info("voice_project: transcript=%r title=%r", transcript, title)
     return VoiceProjectResponse(transcript=transcript, title=title, description=transcript)
+
+
+def _as_float(v: object) -> float | None:
+    try:
+        return float(v) if v is not None else None  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+
+def _as_int(v: object) -> int | None:
+    try:
+        return int(v) if v is not None else None  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+
+async def _parse_payment(
+    transcript: str, categories: list[str], members: list[str]
+) -> VoicePaymentData:
+    """LLM-extract a single payment. Empty VoicePaymentData on failure."""
+    user = json.dumps(
+        {"text": transcript, "categories": categories, "members": members},
+        ensure_ascii=False,
+    )
+    try:
+        resp = await _get_client().chat.completions.create(
+            model=get_settings().openai_model,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": _PAYMENT_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+        )
+        d = json.loads(resp.choices[0].message.content or "{}")
+        rtype = d.get("recurrence_type")
+        cat = d.get("category")
+        payer = d.get("payer")
+        return VoicePaymentData(
+            title=str(d.get("title") or "").strip(),
+            amount=_as_float(d.get("amount")),
+            is_recurring=bool(d.get("is_recurring")),
+            recurrence_type=rtype if rtype in ("weekly", "monthly") else None,
+            recurrence_day=_as_int(d.get("recurrence_day")),
+            # Trust only verbatim matches against the family's lists.
+            category=cat if cat in categories else None,
+            payer=payer if payer in members else None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("payment parse failed")
+        return VoicePaymentData()
+
+
+def _validate_payment(p: VoicePaymentData) -> list[str]:
+    """Missing keys vs the family-os expense API. [] = ready to add."""
+    missing: list[str] = []
+    if p.amount is None or p.amount <= 0:
+        missing.append("amount")
+    if p.is_recurring:
+        day = p.recurrence_day
+        ok = (p.recurrence_type == "weekly" and day is not None and 0 <= day <= 6) or (
+            p.recurrence_type == "monthly" and day is not None and 1 <= day <= 31
+        )
+        if not ok:
+            missing.append("recurrence")
+    return missing
+
+
+@router.post("/payment", response_model=VoicePaymentResponse)
+async def voice_payment(
+    audio: UploadFile = File(...),
+    context: str | None = Form(None),
+) -> VoicePaymentResponse:
+    """Transcribe a Hebrew clip → a single payment draft + missing-fields check.
+
+    `context` (optional) is JSON {"categories":[...],"members":[...]} of the
+    family's budget-category names + member names, so the LLM can derive the
+    category and resolve the payer. Returns the parsed payment + `missing`
+    (machine keys); the app reviews/adds it (defaulting the payer to the
+    current user when none was said).
+    """
+    transcript = await _transcribe(audio)
+    if not transcript:
+        return VoicePaymentResponse(
+            transcript="", payment=VoicePaymentData(), missing=["amount"]
+        )
+    categories: list[str] = []
+    members: list[str] = []
+    if context:
+        try:
+            ctx = json.loads(context)
+            if isinstance(ctx, dict):
+                categories = [str(c) for c in ctx.get("categories", []) if isinstance(c, str)]
+                members = [str(m) for m in ctx.get("members", []) if isinstance(m, str)]
+        except (ValueError, TypeError):
+            pass
+    payment = await _parse_payment(transcript, categories, members)
+    missing = _validate_payment(payment)
+    logger.info(
+        "voice_payment: transcript=%r amount=%s recurring=%s missing=%s",
+        transcript, payment.amount, payment.is_recurring, missing,
+    )
+    return VoicePaymentResponse(transcript=transcript, payment=payment, missing=missing)
