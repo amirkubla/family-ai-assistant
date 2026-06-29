@@ -26,8 +26,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
-# OpenAI transcription model — reliable, cheap, good Hebrew support.
-_TRANSCRIBE_MODEL = "whisper-1"
+# OpenAI transcription model. gpt-4o-transcribe is markedly better at Hebrew
+# than whisper-1. The prompt biases it toward grocery vocabulary.
+_TRANSCRIBE_MODEL = "gpt-4o-transcribe"
+_TRANSCRIBE_PROMPT = (
+    "רשימת קניות לבית בעברית. דוגמאות: חלב, ביצים, לחם, עגבניות, גבינה, "
+    "יוגורט, נייר טואלט, סבון, שמן, אורז, פסטה, בננות."
+)
 
 
 class VoiceGroceryItem(BaseModel):
@@ -55,6 +60,7 @@ async def voice_grocery(audio: UploadFile = File(...)) -> VoiceGroceryResponse:
             model=_TRANSCRIBE_MODEL,
             file=(audio.filename or "voice.m4a", data),
             language="he",
+            prompt=_TRANSCRIBE_PROMPT,
         )
     except Exception:  # noqa: BLE001 — surface a clean 502 to the caller
         logger.exception("voice_grocery: transcription failed")
