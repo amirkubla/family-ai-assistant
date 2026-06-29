@@ -42,6 +42,13 @@ _NOTE_TITLE_SYSTEM = (
     'ללא מירכאות וללא נקודה בסוף. החזר JSON בלבד: {"title": "..."}'
 )
 
+# Split free-form Hebrew speech into discrete to-do tasks.
+_CHORE_SYSTEM = (
+    "אתה מחלץ רשימת מטלות (to-do) מהקלטה בעברית. פצל את הדברים שנאמרו למטלות "
+    "נפרדות, כל אחת כניסוח קצר וברור (2–6 מילים). התעלם ממילות קישור. "
+    'החזר JSON בלבד: {"tasks": ["...", "..."]}'
+)
+
 
 async def _transcribe(audio: UploadFile, prompt: str | None = None) -> str:
     """Transcribe a Hebrew clip to text. 400 on empty audio, 502 on failure."""
@@ -82,6 +89,25 @@ async def _generate_note_title(transcript: str) -> str:
         return ""
 
 
+async def _extract_tasks(transcript: str) -> list[str]:
+    """Split a Hebrew transcript into discrete to-do titles. [] on failure."""
+    try:
+        resp = await _get_client().chat.completions.create(
+            model=get_settings().openai_model,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": _CHORE_SYSTEM},
+                {"role": "user", "content": transcript},
+            ],
+        )
+        data = json.loads(resp.choices[0].message.content or "{}")
+        return [str(x).strip() for x in data.get("tasks", []) if str(x).strip()]
+    except Exception:  # noqa: BLE001 — never fail the request on a parse error
+        logger.exception("chore extraction failed")
+        return []
+
+
 class VoiceGroceryItem(BaseModel):
     title: str
     qty: str | None = None
@@ -98,6 +124,15 @@ class VoiceNoteResponse(BaseModel):
     transcript: str
     title: str
     body: str
+
+
+class VoiceChoreItem(BaseModel):
+    title: str
+
+
+class VoiceChoreResponse(BaseModel):
+    transcript: str
+    items: list[VoiceChoreItem]
 
 
 @router.post("/grocery", response_model=VoiceGroceryResponse)
@@ -169,3 +204,17 @@ async def voice_note(audio: UploadFile = File(...)) -> VoiceNoteResponse:
     title = await _generate_note_title(transcript)
     logger.info("voice_note: transcript=%r title=%r", transcript, title)
     return VoiceNoteResponse(transcript=transcript, title=title, body=transcript)
+
+
+@router.post("/chore", response_model=VoiceChoreResponse)
+async def voice_chore(audio: UploadFile = File(...)) -> VoiceChoreResponse:
+    """Transcribe a Hebrew clip → a list of to-do tasks (no write).
+
+    The family-os app reviews the tasks and adds them via its own chore CRUD.
+    """
+    transcript = await _transcribe(audio)
+    if not transcript:
+        return VoiceChoreResponse(transcript="", items=[])
+    items = [VoiceChoreItem(title=x) for x in await _extract_tasks(transcript)]
+    logger.info("voice_chore: transcript=%r -> %d task(s)", transcript, len(items))
+    return VoiceChoreResponse(transcript=transcript, items=items)
