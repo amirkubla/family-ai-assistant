@@ -9,3 +9,4 @@ apscheduler
 python-dateutil
 httpx>=0.27
 openai>=1.40
+python-multipart  # FastAPI file uploads (UploadFile) — used by /voice/* endpoints

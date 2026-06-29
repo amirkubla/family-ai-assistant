@@ -15,6 +15,7 @@ from app.api import task_routes
 from app.api import reminder_routes
 from app.api import recurring_pattern_routes
 from app.api import telegram_routes
+from app.api import voice_routes
 
 # App-level logging at INFO. uvicorn doesn't configure the root logger, so
 # without this our logging.getLogger(__name__).info(...) calls are dropped
@@ -63,6 +64,10 @@ app.include_router(recurring_pattern_routes.router, prefix="/api")
 # frontend hardcodes the URL as ${ASSISTANT_URL}/telegram/generate-code,
 # and Telegram itself just POSTs to whatever webhook we register.
 app.include_router(telegram_routes.router)
+
+# Voice router is also mounted at root — the family-os app uploads audio to
+# ${ASSISTANT_URL}/voice/grocery, same convention as /telegram/*.
+app.include_router(voice_routes.router)
 
 
 @app.get("/", tags=["meta"])
